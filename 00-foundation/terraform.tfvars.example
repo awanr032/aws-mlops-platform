@@ -1,0 +1,7 @@
+# Copy this file to terraform.tfvars and fill in your values.
+# terraform.tfvars is ignored by git, so your email stays out of the repo.
+
+budget_email       = "you@example.com"
+monthly_budget_usd = 10
+github_owner       = "awanr032"
+github_repo        = "aws-mlops-platform"
