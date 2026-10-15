@@ -1,8 +1,5 @@
 # Lets GitHub Actions get short-lived AWS credentials without any stored access keys.
 # Only workflows running on the main branch of github_owner/github_repo can assume the role.
-#
-# If you decide to add GitHub Actions later (Day 5), you can delete this file
-# and the github_deploy_role_arn output for now.
 
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
@@ -33,7 +30,12 @@ data "aws_iam_policy_document" "github_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/main"]
+      values = [
+        # Newer GitHub format, with immutable owner and repo IDs
+        "repo:${var.github_owner}@172268738/${var.github_repo}@1420551244:ref:refs/heads/main",
+        # Older format, kept in case GitHub sends it
+        "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/main",
+      ]
     }
   }
 }
@@ -45,8 +47,7 @@ resource "aws_iam_role" "github_deploy" {
   max_session_duration = 3600
 }
 
-# Broad permissions for now: later projects create Lambdas, IAM roles, SageMaker jobs and more.
-# The trust policy above is the main protection: only your repo's main branch can use this role.
+# Broad permissions for now; the trust policy above limits who can use the role.
 # Tighten this once the set of services used is settled.
 resource "aws_iam_role_policy_attachment" "github_deploy_admin" {
   role       = aws_iam_role.github_deploy.name
