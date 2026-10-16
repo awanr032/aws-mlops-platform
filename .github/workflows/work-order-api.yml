@@ -1,0 +1,70 @@
+name: work-order-api
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "01-work-order-api/**"
+      - ".github/workflows/work-order-api.yml"
+  pull_request:
+    paths:
+      - "01-work-order-api/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What Terraform should do"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write # for the OIDC login to AWS
+  contents: read
+
+defaults:
+  run:
+    working-directory: 01-work-order-api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
+
+  terraform:
+    needs: test
+    # The AWS role only trusts the main branch, so pull requests stop after the tests.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency: work-order-api-terraform
+    env:
+      ACTION: ${{ inputs.action || 'plan' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: terraform ${{ env.ACTION }}
+        run: |
+          case "$ACTION" in
+            apply)   terraform apply   -auto-approve -input=false ;;
+            destroy) terraform destroy -auto-approve -input=false ;;
+            *)       terraform plan    -input=false ;;
+          esac
+
+      - name: Show the API URL
+        if: env.ACTION == 'apply'
+        run: terraform output api_url
