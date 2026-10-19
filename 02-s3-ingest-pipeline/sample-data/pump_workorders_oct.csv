@@ -1,0 +1,6 @@
+asset_id,date,priority,description,downtime_hours
+P-101,2026-10-01,high,Leaking seal on discharge side,3.5
+P-102,2026-10-02,low,Routine vibration check,0
+,2026-10-03,medium,Noisy bearing on motor end,1
+P-104,31/02/2026,high,Motor overheating,6
+P-105,2026-10-05,urgent,Valve stuck half open,2

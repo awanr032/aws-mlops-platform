@@ -1,0 +1,6 @@
+asset_id,date,priority,description,technician,downtime_hours
+C-7,2026-09-28,medium,Replace intake filter,R. Awan,1.5
+C-7,2026-10-04,high,Oil pressure alarm during start-up,J. Smith,4
+C-9,2026-10-06,low,Check belt tension,R. Awan,0.5
+C-9,2026-10-11,critical,Seized drive coupling,J. Smith,12
+C-12,2026-10-14,medium,Condensate drain blocked,A. Khan,2

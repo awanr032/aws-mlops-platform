@@ -1,0 +1,2 @@
+# Deliberately not UTF-8: keep the bytes exactly as they are.
+not_utf8.csv binary

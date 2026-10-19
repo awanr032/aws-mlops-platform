@@ -1,0 +1,90 @@
+name: ingest-pipeline
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "02-s3-ingest-pipeline/**"
+      - ".github/workflows/ingest-pipeline.yml"
+  pull_request:
+    paths:
+      - "02-s3-ingest-pipeline/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What Terraform should do"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: 02-s3-ingest-pipeline
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
+
+  terraform:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency: ingest-pipeline-terraform
+    env:
+      ACTION: ${{ inputs.action || 'plan' }}
+      TF_VAR_notification_email: ${{ vars.NOTIFICATION_EMAIL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false # lets later steps read `terraform output` cleanly
+
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: terraform ${{ env.ACTION }}
+        run: |
+          case "$ACTION" in
+            apply)   terraform apply   -auto-approve -input=false ;;
+            destroy) terraform destroy -auto-approve -input=false ;;
+            *)       terraform plan    -input=false ;;
+          esac
+
+      # After a deploy, push one known-good file through the real pipeline and wait for the result.
+      - name: Smoke test
+        if: env.ACTION == 'apply'
+        run: |
+          BUCKET=$(terraform output -raw bucket)
+          NAME="smoke-test-${GITHUB_RUN_ID}.csv"
+          aws s3 cp sample-data/compressor_workorders_clean.csv "s3://$BUCKET/incoming/$NAME"
+          for i in $(seq 1 24); do
+            if aws s3api head-object --bucket "$BUCKET" --key "processed/$NAME" >/dev/null 2>&1; then
+              echo "Pipeline produced processed/$NAME after about $((i * 5)) seconds"
+              aws s3 cp "s3://$BUCKET/processed/$NAME" - | head -3
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::No processed output after 2 minutes. Check the Lambda logs in CloudWatch."
+          exit 1
+
+      - name: Show the bucket
+        if: env.ACTION == 'apply'
+        run: terraform output bucket
