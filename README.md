@@ -9,7 +9,7 @@ Production-style ML systems on AWS: serverless APIs, event-driven pipelines, Sag
 | [`00-foundation`](00-foundation) | Secure account baseline: audit logging, budget alerts, GitHub OIDC | IAM, CloudTrail, S3, Budgets |
 | [`01-work-order-api`](01-work-order-api) | Serverless API for maintenance work orders | API Gateway, Lambda, DynamoDB |
 | [`02-s3-ingest-pipeline`](02-s3-ingest-pipeline) | CSV upload → validation → dead-letter queue → email summary | S3 events, SQS, SNS |
-| `03-entity-extraction-workflow` | Orchestrated LLM entity extraction with retries and error handling | Step Functions, Bedrock |
+| [`03-entity-extraction-workflow`](03-entity-extraction-workflow) | Orchestrated LLM entity extraction with retries and error handling | Step Functions, Bedrock |
 | `04-lambda-model-container` | Containerised ML model built and pushed by CI | ECR, Lambda, GitHub Actions |
 | `05-sagemaker-training` | Training job, model registry, batch transform, serverless endpoint | SageMaker |
 | `06-manuals-rag` | Question answering over maintenance manuals with cited sources | Bedrock embeddings, FAISS on S3 |

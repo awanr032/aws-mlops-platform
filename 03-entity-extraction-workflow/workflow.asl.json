@@ -1,0 +1,206 @@
+{
+  "Comment": "Extract maintenance entities from work-order text with a Bedrock model, check the answer, and store it.",
+  "StartAt": "ValidateInput",
+  "States": {
+    "ValidateInput": {
+      "Type": "Task",
+      "Comment": "Reject empty or oversized text before paying for a model call.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${validate_function_arn}",
+        "Payload": {
+          "input.$": "$",
+          "execution_name.$": "$$.Execution.Name"
+        }
+      },
+      "ResultSelector": {
+        "work_order_id.$": "$.Payload.work_order_id",
+        "text.$": "$.Payload.text"
+      },
+      "ResultPath": "$.work_order",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["InvalidInput"],
+          "ResultPath": "$.error",
+          "Next": "InputRejected"
+        }
+      ],
+      "Next": "ExtractEntities"
+    },
+
+    "ExtractEntities": {
+      "Type": "Task",
+      "Comment": "Ask the model. If Bedrock is busy, wait 2s, 4s, 8s and try again.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${extract_function_arn}",
+        "Payload": {
+          "text.$": "$.work_order.text"
+        }
+      },
+      "ResultSelector": {
+        "raw.$": "$.Payload.raw",
+        "model_id.$": "$.Payload.model_id",
+        "input_tokens.$": "$.Payload.input_tokens",
+        "output_tokens.$": "$.Payload.output_tokens"
+      },
+      "ResultPath": "$.model",
+      "Retry": [
+        {
+          "ErrorEquals": ["ModelBusy"],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2,
+          "JitterStrategy": "FULL"
+        },
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RecordFailure"
+        }
+      ],
+      "Next": "CheckAnswer"
+    },
+
+    "CheckAnswer": {
+      "Type": "Task",
+      "Comment": "Never trust the model blindly: parse its JSON and check every field.",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "${check_function_arn}",
+        "Payload": {
+          "raw.$": "$.model.raw",
+          "text.$": "$.work_order.text"
+        }
+      },
+      "ResultSelector": {
+        "valid.$": "$.Payload.valid",
+        "entities.$": "$.Payload.entities",
+        "problems.$": "$.Payload.problems"
+      },
+      "ResultPath": "$.check",
+      "Retry": [
+        {
+          "ErrorEquals": ["Lambda.ServiceException", "Lambda.TooManyRequestsException", "Lambda.SdkClientException"],
+          "IntervalSeconds": 1,
+          "MaxAttempts": 2,
+          "BackoffRate": 2
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": ["States.ALL"],
+          "ResultPath": "$.error",
+          "Next": "RecordFailure"
+        }
+      ],
+      "Next": "IsAnswerUsable"
+    },
+
+    "IsAnswerUsable": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.check.valid",
+          "BooleanEquals": true,
+          "Next": "SaveResult"
+        }
+      ],
+      "Default": "SaveForReview"
+    },
+
+    "SaveResult": {
+      "Type": "Task",
+      "Comment": "Write straight to DynamoDB; no Lambda needed for a simple save.",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Item": {
+          "work_order_id": { "S.$": "$.work_order.work_order_id" },
+          "status": { "S": "extracted" },
+          "text": { "S.$": "$.work_order.text" },
+          "entities": { "S.$": "States.JsonToString($.check.entities)" },
+          "model_id": { "S.$": "$.model.model_id" },
+          "input_tokens": { "N.$": "States.Format('{}', $.model.input_tokens)" },
+          "output_tokens": { "N.$": "States.Format('{}', $.model.output_tokens)" },
+          "execution": { "S.$": "$$.Execution.Name" },
+          "processed_at": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "Extracted"
+    },
+
+    "SaveForReview": {
+      "Type": "Task",
+      "Comment": "Unusable answers are kept with the reasons, so a person can fix them.",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Item": {
+          "work_order_id": { "S.$": "$.work_order.work_order_id" },
+          "status": { "S": "needs_review" },
+          "text": { "S.$": "$.work_order.text" },
+          "raw_model_answer": { "S.$": "$.model.raw" },
+          "problems": { "S.$": "States.JsonToString($.check.problems)" },
+          "model_id": { "S.$": "$.model.model_id" },
+          "execution": { "S.$": "$$.Execution.Name" },
+          "processed_at": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "NeedsReview"
+    },
+
+    "RecordFailure": {
+      "Type": "Task",
+      "Comment": "The model call or the check failed for good. Record why, then fail the run.",
+      "Resource": "arn:aws:states:::dynamodb:putItem",
+      "Parameters": {
+        "TableName": "${table_name}",
+        "Item": {
+          "work_order_id": { "S.$": "$.work_order.work_order_id" },
+          "status": { "S": "failed" },
+          "text": { "S.$": "$.work_order.text" },
+          "error": { "S.$": "$.error.Error" },
+          "details": { "S.$": "States.JsonToString($.error)" },
+          "execution": { "S.$": "$$.Execution.Name" },
+          "processed_at": { "S.$": "$$.State.EnteredTime" }
+        }
+      },
+      "ResultPath": null,
+      "Next": "ExtractionFailed"
+    },
+
+    "Extracted": { "Type": "Succeed" },
+    "NeedsReview": { "Type": "Succeed" },
+
+    "InputRejected": {
+      "Type": "Fail",
+      "Error": "InvalidInput",
+      "CausePath": "$.error.Cause"
+    },
+
+    "ExtractionFailed": {
+      "Type": "Fail",
+      "Error": "ExtractionFailed",
+      "Cause": "The model call or the answer check failed. See the 'failed' item in the results table."
+    }
+  }
+}

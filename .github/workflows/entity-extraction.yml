@@ -1,0 +1,94 @@
+name: entity-extraction
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "03-entity-extraction-workflow/**"
+      - ".github/workflows/entity-extraction.yml"
+  pull_request:
+    paths:
+      - "03-entity-extraction-workflow/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What Terraform should do"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: 03-entity-extraction-workflow
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
+      - name: Check the workflow definition is valid JSON
+        run: python -c "import json; json.load(open('workflow.asl.json'))"
+
+  terraform:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency: entity-extraction-terraform
+    env:
+      ACTION: ${{ inputs.action || 'plan' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: terraform ${{ env.ACTION }}
+        run: |
+          case "$ACTION" in
+            apply)   terraform apply   -auto-approve -input=false ;;
+            destroy) terraform destroy -auto-approve -input=false ;;
+            *)       terraform plan    -input=false ;;
+          esac
+
+      # After a deploy, run one real work order through the workflow, including the model call.
+      - name: Smoke test
+        if: env.ACTION == 'apply'
+        run: |
+          ARN=$(terraform output -raw state_machine_arn)
+          EXEC=$(aws stepfunctions start-execution --state-machine-arn "$ARN" \
+            --name "smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            --input file://examples/01_pump_seal_leak.json --query executionArn --output text)
+          for i in $(seq 1 30); do
+            STATUS=$(aws stepfunctions describe-execution --execution-arn "$EXEC" --query status --output text)
+            [ "$STATUS" != "RUNNING" ] && break
+            sleep 3
+          done
+          echo "Execution status: $STATUS"
+          aws dynamodb get-item --table-name "$(terraform output -raw table_name)" \
+            --key '{"work_order_id": {"S": "WO-1001"}}' --query "Item.[status.S, entities.S, problems.S]" --output text
+          if [ "$STATUS" != "SUCCEEDED" ]; then
+            echo "::error::Smoke test execution ended with $STATUS. Open the Step Functions console to see which step failed."
+            exit 1
+          fi
+
+      - name: Show the console link
+        if: env.ACTION == 'apply'
+        run: terraform output console_url
