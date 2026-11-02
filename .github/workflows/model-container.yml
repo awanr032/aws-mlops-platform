@@ -1,0 +1,113 @@
+name: model-container
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "04-lambda-model-container/**"
+      - ".github/workflows/model-container.yml"
+  pull_request:
+    paths:
+      - "04-lambda-model-container/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "What to do"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: 04-lambda-model-container
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    # An ARM runner builds an ARM image natively, matching the arm64 Lambda (cheaper per ms).
+    runs-on: ubuntu-24.04-arm
+    concurrency: model-container-deploy
+    env:
+      ACTION: ${{ inputs.action || 'plan' }}
+      REPO_NAME: bearing-classifier
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use the commit as the image tag
+        run: echo "TAG=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: terraform plan
+        if: env.ACTION == 'plan'
+        run: terraform plan -input=false -var "image_tag=$TAG"
+
+      # Lambda can only be created once its image exists, so the repository comes first.
+      - name: Create the image repository
+        if: env.ACTION == 'apply'
+        run: |
+          terraform apply -auto-approve -input=false -var "image_tag=$TAG" \
+            -target=aws_ecr_repository.model \
+            -target=aws_ecr_repository_policy.lambda_pull \
+            -target=aws_ecr_lifecycle_policy.model
+
+      - name: Train, check and build the image, then push it to ECR
+        if: env.ACTION == 'apply'
+        run: |
+          REPO=$(aws ecr describe-repositories --repository-names "$REPO_NAME" \
+            --query 'repositories[0].repositoryUri' --output text)
+          if aws ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag="$TAG" >/dev/null 2>&1; then
+            echo "Image $TAG already in ECR; skipping the build."
+            exit 0
+          fi
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${REPO%%/*}"
+          # The training stage inside this build prints the model's metrics and fails if the gate fails.
+          docker build --provenance=false -t "$REPO:$TAG" .
+          docker push "$REPO:$TAG"
+
+      - name: Point Lambda at the new image
+        if: env.ACTION == 'apply'
+        run: terraform apply -auto-approve -input=false -var "image_tag=$TAG"
+
+      - name: Smoke test (cold call, then warm call)
+        if: env.ACTION == 'apply'
+        run: |
+          FN=$(terraform output -raw function_name)
+          aws lambda wait function-updated-v2 --function-name "$FN"
+          for call in cold warm; do
+            aws lambda invoke --function-name "$FN" --cli-binary-format raw-in-base64-out \
+              --payload file://examples/inner_race.json response.json >/dev/null
+            echo "$call call:"; cat response.json; echo
+          done
+          python3 -c "import json,sys; r=json.load(open('response.json')); \
+            sys.exit(0 if r.get('prediction',{}).get('condition')=='inner_race_fault' else 1)" \
+            || { echo "::error::Unexpected prediction from the deployed model"; exit 1; }
+
+      - name: terraform destroy
+        if: env.ACTION == 'destroy'
+        run: terraform destroy -auto-approve -input=false -var "image_tag=$TAG"

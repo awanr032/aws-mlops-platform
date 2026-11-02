@@ -1,0 +1,4 @@
+# Pinned so the model is trained and served with exactly the same library versions.
+scikit-learn==1.7.2
+numpy==2.3.3
+joblib==1.5.2

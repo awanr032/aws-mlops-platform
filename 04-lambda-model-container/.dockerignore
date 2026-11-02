@@ -1,0 +1,10 @@
+# Only app/, training/ and requirements.txt belong in the image.
+tests/
+examples/
+build/
+.terraform/
+*.tf
+*.tfstate*
+*.md
+**/__pycache__/
+.pytest_cache/
