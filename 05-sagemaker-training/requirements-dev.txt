@@ -1,0 +1,6 @@
+# Same scikit-learn as AWS's container (sagemaker-scikit-learn:1.4-2-py312), so tests match the cloud.
+scikit-learn==1.4.2
+numpy==1.26.4
+joblib==1.4.2
+boto3>=1.35
+pytest>=8

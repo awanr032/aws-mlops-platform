@@ -1,0 +1,104 @@
+name: sagemaker-training
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "05-sagemaker-training/**"
+      - ".github/workflows/sagemaker-training.yml"
+  pull_request:
+    paths:
+      - "05-sagemaker-training/**"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "apply = build infrastructure, train = train + register, batch = score a file"
+        type: choice
+        options: [plan, apply, train, batch, destroy]
+        default: plan
+
+permissions:
+  id-token: write
+  contents: read
+
+defaults:
+  run:
+    working-directory: 05-sagemaker-training
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # same Python and scikit-learn as AWS's container
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -v
+
+  deploy:
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    concurrency: sagemaker-training
+    env:
+      ACTION: ${{ inputs.action || 'plan' }}
+      PYTHONUNBUFFERED: "1" # print job progress as it happens
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install boto3 numpy==1.26.4 # the pipeline scripts only start jobs; no ML libraries needed
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-2
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform init -input=false
+      - run: terraform validate
+
+      - name: terraform plan
+        if: env.ACTION == 'plan'
+        run: terraform plan -input=false
+
+      # 'train' applies too, so it always runs against up-to-date infrastructure.
+      - name: terraform apply
+        if: env.ACTION == 'apply' || env.ACTION == 'train'
+        run: terraform apply -auto-approve -input=false
+
+      - name: Pass Terraform outputs to the pipeline scripts
+        if: env.ACTION == 'train' || env.ACTION == 'batch'
+        run: |
+          {
+            echo "BUCKET=$(terraform output -raw bucket)"
+            echo "ROLE_ARN=$(terraform output -raw role_arn)"
+            echo "MODEL_GROUP=$(terraform output -raw model_group)"
+            echo "IMAGE_URI=$(terraform output -raw image_uri)"
+          } >> "$GITHUB_ENV"
+
+      - name: Train on SageMaker, quality gate, register
+        if: env.ACTION == 'train'
+        run: python pipeline/train_and_register.py
+
+      - name: Batch transform with the latest approved model
+        if: env.ACTION == 'batch'
+        run: python pipeline/batch_score.py
+
+      # Terraform can't delete a registry group that still holds model versions, so empty it first.
+      - name: Empty the model registry
+        if: env.ACTION == 'destroy'
+        run: |
+          export MODEL_GROUP=$(terraform output -raw model_group 2>/dev/null || echo bearing-classifier)
+          python pipeline/cleanup.py
+
+      - name: terraform destroy
+        if: env.ACTION == 'destroy'
+        run: terraform destroy -auto-approve -input=false
