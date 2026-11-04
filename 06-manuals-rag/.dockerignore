@@ -1,0 +1,10 @@
+# Only rag/ and requirements.txt belong in the image.
+manuals/
+eval/
+tests/
+.terraform/
+*.tf
+*.tfstate*
+*.md
+**/__pycache__/
+.pytest_cache/
