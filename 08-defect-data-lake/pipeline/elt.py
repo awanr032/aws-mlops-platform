@@ -16,9 +16,17 @@ SQL_FILE = os.path.join(HERE, "..", "elt", "complaints_elt.sql")
 PREFIX = "curated/elt/complaints/"
 
 
+def strip_comments(sql: str) -> str:
+    """Remove '-- ...' comments and a trailing ';' before sending SQL to Athena's API, which
+    accepts exactly one statement per call. (Our SQL has no '--' inside quoted strings, so
+    cutting at '--' is safe.)"""
+    lines = [line.split("--", 1)[0].rstrip() for line in sql.splitlines()]
+    return "\n".join(line for line in lines if line.strip()).strip().rstrip(";").strip()
+
+
 def build_sql(database: str, bucket: str) -> str:
     with open(SQL_FILE) as f:
-        return f.read().format(database=database, bucket=bucket)
+        return strip_comments(f.read().format(database=database, bucket=bucket))
 
 
 def empty_prefix(s3, bucket: str, prefix: str) -> int:

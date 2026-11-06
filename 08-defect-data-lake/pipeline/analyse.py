@@ -12,6 +12,7 @@ import os
 import sys
 
 import athena
+from elt import strip_comments
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ANALYSIS = os.path.join(HERE, "..", "analysis")
@@ -36,7 +37,7 @@ def load_queries(database: str, year: int) -> list[tuple[str, str]]:
     for path in sorted(glob.glob(os.path.join(ANALYSIS, "*.sql"))):
         text = open(path).read()
         title = text.splitlines()[0].lstrip("- ").replace("{year}", str(year))
-        queries.append((title, text.format(database=database, year=year)))
+        queries.append((title, strip_comments(text.format(database=database, year=year))))
     return queries
 
 

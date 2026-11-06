@@ -42,6 +42,13 @@ def test_elt_sql_is_filled_in_and_partition_column_is_last():
     assert final_select.strip().startswith("*, year(received_date) AS received_year")
 
 
+def test_sql_sent_to_athena_has_no_comments_or_semicolons():
+    # Athena treats any ';' (even in a comment) as a second statement and rejects the call.
+    for sql in [elt.build_sql("db", "b")] + [q for _, q in analyse.load_queries("db", 2024)]:
+        assert "--" not in sql and ";" not in sql
+    assert elt.strip_comments("-- note; here\nSELECT 1 -- why\n;") == "SELECT 1"
+
+
 def test_analysis_queries_load_with_titles():
     queries = analyse.load_queries("defect_lake", 2024)
     assert len(queries) == 5
